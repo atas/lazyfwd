@@ -1,6 +1,9 @@
 package tunnel
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 func (t *Tunnel) LocalPort() int {
 	t.mu.RLock()
@@ -35,4 +38,17 @@ func (t *Tunnel) LastError() error {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.lastError
+}
+
+func (t *Tunnel) MarkFailed(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state == StateRunning || t.state == StateStarting {
+		log.Printf("[%s] Marking tunnel as failed: %v", t.hostname, err)
+		t.lastError = err
+		t.state = StateFailed
+		if t.stopChan != nil {
+			close(t.stopChan)
+		}
+	}
 }

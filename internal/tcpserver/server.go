@@ -156,6 +156,7 @@ func (s *Server) handleConnection(localPort int, conn net.Conn) {
 	backend, err := net.DialTimeout("tcp", backendAddr, 10*time.Second)
 	if err != nil {
 		log.Printf("[tcp:%d] Failed to connect to backend %s: %v", localPort, backendAddr, err)
+		tunnel.MarkFailed(fmt.Errorf("backend dial failed: %w", err))
 		return
 	}
 	defer backend.Close()

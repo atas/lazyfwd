@@ -63,6 +63,8 @@ func (s *Server) handleTLSConnection(conn *peekConn) {
 	backendConn, err := net.DialTimeout("tcp", backendAddr, TLSBackendDialTimeout)
 	if err != nil {
 		log.Printf("[tls] [%s] Failed to connect to backend: %v", sni, err)
+		// Port-forward is likely dead -- mark tunnel failed so next connection recreates it
+		tunnel.MarkFailed(fmt.Errorf("backend dial failed: %w", err))
 		s.sendTLSErrorPage(conn.Conn, buf[:n], sni, tlsErrorBackendConnection, fmt.Sprintf("Failed to connect to backend: %v", err))
 		return
 	}

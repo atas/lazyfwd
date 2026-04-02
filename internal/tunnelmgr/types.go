@@ -17,6 +17,8 @@ type TunnelHandle interface {
 	IdleDuration() time.Duration
 	State() tunnel.State
 	LastError() error
+	Hostname() string
+	MarkFailed(err error)
 }
 
 type TunnelInfo struct {

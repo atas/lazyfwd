@@ -137,3 +137,73 @@ func TestTunnel_ConcurrentLocalPortAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTunnel_MarkFailed_FromRunning(t *testing.T) {
+	stopChan := make(chan struct{})
+	tun := &Tunnel{
+		hostname: "test.localhost",
+		state:    StateRunning,
+		stopChan: stopChan,
+	}
+
+	testErr := &testError{msg: "connection reset by peer"}
+	tun.MarkFailed(testErr)
+
+	if tun.state != StateFailed {
+		t.Errorf("state = %v, want %v", tun.state, StateFailed)
+	}
+	if tun.lastError != testErr {
+		t.Errorf("lastError = %v, want %v", tun.lastError, testErr)
+	}
+
+	// stopChan should have been closed
+	select {
+	case <-stopChan:
+		// expected
+	default:
+		t.Error("stopChan should have been closed")
+	}
+}
+
+func TestTunnel_MarkFailed_FromIdle(t *testing.T) {
+	tun := &Tunnel{
+		hostname: "test.localhost",
+		state:    StateIdle,
+	}
+
+	tun.MarkFailed(&testError{msg: "should not change state"})
+
+	// Idle tunnels should not be marked failed (they're already stopped)
+	if tun.state != StateIdle {
+		t.Errorf("state = %v, want %v (should remain idle)", tun.state, StateIdle)
+	}
+}
+
+func TestTunnel_MarkFailed_FromFailed(t *testing.T) {
+	tun := &Tunnel{
+		hostname: "test.localhost",
+		state:    StateFailed,
+	}
+
+	tun.MarkFailed(&testError{msg: "second error"})
+
+	// Already failed -- should remain failed but not panic
+	if tun.state != StateFailed {
+		t.Errorf("state = %v, want %v", tun.state, StateFailed)
+	}
+}
+
+func TestTunnel_MarkFailed_NilStopChan(t *testing.T) {
+	tun := &Tunnel{
+		hostname: "test.localhost",
+		state:    StateRunning,
+		stopChan: nil,
+	}
+
+	// Should not panic with nil stopChan
+	tun.MarkFailed(&testError{msg: "test"})
+
+	if tun.state != StateFailed {
+		t.Errorf("state = %v, want %v", tun.state, StateFailed)
+	}
+}
