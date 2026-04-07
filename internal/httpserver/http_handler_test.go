@@ -46,6 +46,46 @@ func (m *mockTunnel) Touch()                       { m.touchCalled = true }
 func (m *mockTunnel) IdleDuration() time.Duration  { return 0 }
 func (m *mockTunnel) State() tunnel.State          { return tunnel.StateRunning }
 func (m *mockTunnel) LastError() error             { return nil }
+func (m *mockTunnel) Hostname() string             { return "mock.localhost" }
+func (m *mockTunnel) MarkFailed(err error)         { m.running = false }
+
+// retryMockTunnel is a mock tunnel that can simulate a dead port-forward.
+// On the first request it points to a dead port; after MarkFailed + recreation
+// it points to a working backend.
+type retryMockTunnel struct {
+	running       bool
+	localPort     int
+	scheme        string
+	startCalled   bool
+	touchCalled   bool
+	markedFailed  bool
+	failedErr     error
+}
+
+func (m *retryMockTunnel) IsRunning() bool              { return m.running }
+func (m *retryMockTunnel) Start(ctx context.Context) error {
+	m.startCalled = true
+	m.running = true
+	return nil
+}
+func (m *retryMockTunnel) Stop()                        {}
+func (m *retryMockTunnel) LocalPort() int               { return m.localPort }
+func (m *retryMockTunnel) Scheme() string {
+	if m.scheme == "" {
+		return "http"
+	}
+	return m.scheme
+}
+func (m *retryMockTunnel) Touch()                       { m.touchCalled = true }
+func (m *retryMockTunnel) IdleDuration() time.Duration  { return 0 }
+func (m *retryMockTunnel) State() tunnel.State          { return tunnel.StateRunning }
+func (m *retryMockTunnel) LastError() error             { return m.failedErr }
+func (m *retryMockTunnel) Hostname() string             { return "mock.localhost" }
+func (m *retryMockTunnel) MarkFailed(err error) {
+	m.markedFailed = true
+	m.failedErr = err
+	m.running = false
+}
 
 // mockManager implements Manager interface for testing
 type mockManager struct {
@@ -59,6 +99,24 @@ func (m *mockManager) GetOrCreateTunnel(hostname string, scheme string) (tunnelm
 	m.getCalls = append(m.getCalls, hostname)
 	m.getSchemes = append(m.getSchemes, scheme)
 	return m.tunnel, m.err
+}
+
+// retryMockManager returns different tunnels on successive calls,
+// simulating a dead tunnel being replaced with a fresh one.
+type retryMockManager struct {
+	tunnels    []tunnelmgr.TunnelHandle
+	callIndex  int
+	getCalls   []string
+}
+
+func (m *retryMockManager) GetOrCreateTunnel(hostname string, scheme string) (tunnelmgr.TunnelHandle, error) {
+	m.getCalls = append(m.getCalls, hostname)
+	idx := m.callIndex
+	if idx >= len(m.tunnels) {
+		idx = len(m.tunnels) - 1
+	}
+	m.callIndex++
+	return m.tunnels[idx], nil
 }
 
 func testHTTPConfig() *config.Config {
@@ -342,5 +400,101 @@ func TestServer_ServeHTTP_HTTPSchemeDefault(t *testing.T) {
 
 	if receivedProto != "http" {
 		t.Errorf("Expected default X-Forwarded-Proto 'http', got %q", receivedProto)
+	}
+}
+
+func TestServer_ServeHTTP_RetryOnDeadTunnel(t *testing.T) {
+	// Simulate a dead port-forward: first tunnel points to a port with nothing listening,
+	// after MarkFailed the manager returns a fresh tunnel pointing to a working backend.
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("recovered"))
+	}))
+	defer backend.Close()
+	backendPort := backend.Listener.Addr().(*net.TCPAddr).Port
+
+	// Dead tunnel points to a port that's not listening
+	deadTun := &retryMockTunnel{
+		running:   true,
+		localPort: 1, // port 1 should refuse connections
+		scheme:    "http",
+	}
+
+	// Fresh tunnel points to working backend
+	freshTun := &retryMockTunnel{
+		running:   true,
+		localPort: backendPort,
+		scheme:    "http",
+	}
+
+	mockMgr := &retryMockManager{
+		tunnels: []tunnelmgr.TunnelHandle{deadTun, freshTun},
+	}
+
+	cfg := testHTTPConfig()
+	server := NewServer(cfg, mockMgr)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "test.localhost:8989"
+
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	// The dead tunnel should have been marked as failed
+	if !deadTun.markedFailed {
+		t.Error("Expected dead tunnel to be marked as failed")
+	}
+
+	// Manager should have been called twice (initial + retry)
+	if len(mockMgr.getCalls) != 2 {
+		t.Errorf("Expected 2 GetOrCreateTunnel calls (initial + retry), got %d", len(mockMgr.getCalls))
+	}
+
+	// The retry should have succeeded with 200
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200 after retry, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "recovered") {
+		t.Errorf("Expected body to contain 'recovered', got %q", body)
+	}
+}
+
+func TestServer_ServeHTTP_RetryFailsGracefully(t *testing.T) {
+	// Both the initial and retry tunnels are dead -- should return 502
+
+	deadTun1 := &retryMockTunnel{
+		running:   true,
+		localPort: 1,
+		scheme:    "http",
+	}
+
+	deadTun2 := &retryMockTunnel{
+		running:   true,
+		localPort: 2,
+		scheme:    "http",
+	}
+
+	mockMgr := &retryMockManager{
+		tunnels: []tunnelmgr.TunnelHandle{deadTun1, deadTun2},
+	}
+
+	cfg := testHTTPConfig()
+	server := NewServer(cfg, mockMgr)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "test.localhost:8989"
+
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if !deadTun1.markedFailed {
+		t.Error("Expected first tunnel to be marked as failed")
+	}
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("Expected status 502 when both tunnels are dead, got %d", w.Code)
 	}
 }

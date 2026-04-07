@@ -85,6 +85,17 @@ func (m *mockTunnel) State() tunnel.State {
 	return m.state
 }
 
+func (m *mockTunnel) Hostname() string {
+	return "mock.localhost"
+}
+
+func (m *mockTunnel) MarkFailed(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.running = false
+	m.state = tunnel.StateFailed
+}
+
 func (m *mockTunnel) wasTouched() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

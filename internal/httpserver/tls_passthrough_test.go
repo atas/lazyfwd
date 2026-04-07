@@ -39,6 +39,8 @@ func (m *tlsMockTunnel) Touch()                      { m.touchCalled = true }
 func (m *tlsMockTunnel) IdleDuration() time.Duration { return 0 }
 func (m *tlsMockTunnel) State() tunnel.State         { return tunnel.StateRunning }
 func (m *tlsMockTunnel) LastError() error            { return nil }
+func (m *tlsMockTunnel) Hostname() string            { return "mock.localhost" }
+func (m *tlsMockTunnel) MarkFailed(err error)        { m.running = false }
 
 // tlsMockManager implements Manager interface for TLS tests
 type tlsMockManager struct {
